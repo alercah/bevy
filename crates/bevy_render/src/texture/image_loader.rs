@@ -17,34 +17,12 @@ pub struct ImageLoader {
     supported_compressed_formats: CompressedImageFormats,
 }
 
-pub(crate) const IMG_FILE_EXTENSIONS: &[&str] = &[
-    #[cfg(feature = "basis-universal")]
-    "basis",
-    #[cfg(feature = "bmp")]
-    "bmp",
-    #[cfg(feature = "png")]
-    "png",
-    #[cfg(feature = "dds")]
-    "dds",
-    #[cfg(feature = "tga")]
-    "tga",
-    #[cfg(feature = "jpeg")]
-    "jpg",
-    #[cfg(feature = "jpeg")]
-    "jpeg",
-    #[cfg(feature = "ktx2")]
-    "ktx2",
-    #[cfg(feature = "webp")]
-    "webp",
-    #[cfg(feature = "pnm")]
-    "pam",
-    #[cfg(feature = "pnm")]
-    "pbm",
-    #[cfg(feature = "pnm")]
-    "pgm",
-    #[cfg(feature = "pnm")]
-    "ppm",
-];
+macro_rules! enabled_ext (
+    ($feature:literal, $ext:literal) => (
+        #[cfg(feature = $feature)]
+        $ext
+    );
+);
 
 pub(crate) struct DisabledExtension {
     extension: &'static str,
@@ -61,21 +39,27 @@ macro_rules! disabled_ext (
     );
 );
 
-pub(crate) const DISABLED_IMG_FILE_EXTENSIONS: &[DisabledExtension] = &[
-    disabled_ext!("basis-universal", "basis"),
-    disabled_ext!("bmp", "bmp"),
-    disabled_ext!("png", "png"),
-    disabled_ext!("dds", "dds"),
-    disabled_ext!("tga", "tga"),
-    disabled_ext!("jpeg", "jpg"),
-    disabled_ext!("jpeg", "jpeg"),
-    disabled_ext!("ktx2", "ktx2"),
-    disabled_ext!("webp", "webp"),
-    disabled_ext!("pnm", "pam"),
-    disabled_ext!("pnm", "pbm"),
-    disabled_ext!("pnm", "pgm"),
-    disabled_ext!("pnm", "ppm"),
+macro_rules! extension_list [
+    ($entry:ident)  => ([
+        $entry!("basis-universal", "basis"),
+        $entry!("bmp", "bmp"),
+        $entry!("png", "png"),
+        $entry!("dds", "dds"),
+        $entry!("tga", "tga"),
+        $entry!("jpeg", "jpg"),
+        $entry!("jpeg", "jpeg"),
+        $entry!("ktx2", "ktx2"),
+        $entry!("webp", "webp"),
+        $entry!("pnm", "pam"),
+        $entry!("pnm", "pbm"),
+        $entry!("pnm", "pgm"),
+        $entry!("pnm", "ppm"),
+    ]);
 ];
+
+pub(crate) const IMG_FILE_EXTENSIONS: &[&str] = &extension_list![enabled_ext];
+pub(crate) const DISABLED_IMG_FILE_EXTENSIONS: &[DisabledExtension] =
+    &extension_list![disabled_ext];
 
 #[derive(Serialize, Deserialize, Default, Debug)]
 pub enum ImageFormatSetting {
