@@ -25,7 +25,7 @@ use futures_lite::StreamExt;
 use info::*;
 use parking_lot::RwLock;
 use std::path::PathBuf;
-use std::{any::TypeId, path::Path, sync::Arc};
+use std::{any::TypeId, fmt::Write, path::Path, sync::Arc};
 use thiserror::Error;
 
 /// Loads and tracks the state of [`Asset`] values from a configured [`AssetReader`]. This can be used to kick off new asset loads and
@@ -154,7 +154,7 @@ impl AssetServer {
                 MaybeAssetLoader::Ready(loader.clone()),
             );
             match maybe_loader {
-                MaybeAssetLoader::Ready(_) => unreachable!(),
+                MaybeAssetLoader::Ready(_) | MaybeAssetLoader::Missing { .. } => unreachable!(),
                 MaybeAssetLoader::Pending { sender, .. } => {
                     IoTaskPool::get()
                         .spawn(async move {
@@ -216,7 +216,10 @@ impl AssetServer {
             let loaders = self.data.loaders.read();
             let index = *loaders.extension_to_index.get(extension).ok_or_else(|| {
                 MissingAssetLoaderForExtensionError {
-                    extensions: vec![extension.to_string()],
+                    extensions: vec![MissingExtension {
+                        extension: extension.to_string(),
+                        hint: None,
+                    }],
                 }
             })?;
             loaders.values[index].clone()
@@ -225,6 +228,12 @@ impl AssetServer {
         match loader {
             MaybeAssetLoader::Ready(loader) => Ok(loader),
             MaybeAssetLoader::Pending { mut receiver, .. } => Ok(receiver.recv().await.unwrap()),
+            MaybeAssetLoader::Missing { hint } => Err(MissingAssetLoaderForExtensionError {
+                extensions: vec![MissingExtension {
+                    extension: extension.to_string(),
+                    hint: Some(hint),
+                }],
+            }),
         }
     }
 
@@ -246,6 +255,11 @@ impl AssetServer {
         match loader {
             MaybeAssetLoader::Ready(loader) => Ok(loader),
             MaybeAssetLoader::Pending { mut receiver, .. } => Ok(receiver.recv().await.unwrap()),
+            MaybeAssetLoader::Missing { .. } => {
+                unreachable!(
+                    "missing asset hints should only be possible for extensions, not type names"
+                )
+            }
         }
     }
 
@@ -260,18 +274,25 @@ impl AssetServer {
                 .ok_or(MissingAssetLoaderForExtensionError {
                     extensions: Vec::new(),
                 })?;
-        if let Ok(loader) = self.get_asset_loader_with_extension(&full_extension).await {
-            return Ok(loader);
-        }
-        for extension in AssetPath::iter_secondary_extensions(&full_extension) {
-            if let Ok(loader) = self.get_asset_loader_with_extension(extension).await {
-                return Ok(loader);
+
+        let mut missing_extensions = Vec::new();
+        match self.get_asset_loader_with_extension(&full_extension).await {
+            Ok(loader) => return Ok(loader),
+            Err(MissingAssetLoaderForExtensionError { extensions }) => {
+                missing_extensions.extend(extensions)
             }
         }
-        let mut extensions = vec![full_extension.clone()];
-        extensions
-            .extend(AssetPath::iter_secondary_extensions(&full_extension).map(|e| e.to_string()));
-        Err(MissingAssetLoaderForExtensionError { extensions })
+        for extension in AssetPath::iter_secondary_extensions(&full_extension) {
+            match self.get_asset_loader_with_extension(extension).await {
+                Ok(loader) => return Ok(loader),
+                Err(MissingAssetLoaderForExtensionError { extensions }) => {
+                    missing_extensions.extend(extensions)
+                }
+            }
+        }
+        Err(MissingAssetLoaderForExtensionError {
+            extensions: missing_extensions,
+        })
     }
 
     /// Begins loading an [`Asset`] of type `A` stored at `path`. This will not block on the asset load. Instead,
@@ -861,6 +882,21 @@ impl AssetServer {
             .push(MaybeAssetLoader::Pending { sender, receiver });
     }
 
+    /// Register a hint to be given when attempting to load an asset with one of the given extensions, if no
+    /// loader is present.
+    pub fn register_extension_hint(&self, extension: &str, hint: String) {
+        let mut loaders = self.data.loaders.write();
+        let loader_index = loaders.values.len();
+        // Use try_insert so as not to overwrite any existing loader.
+        if loaders
+            .extension_to_index
+            .try_insert(extension.to_string(), loader_index)
+            .is_ok()
+        {
+            loaders.values.push(MaybeAssetLoader::Missing { hint })
+        }
+    }
+
     /// Retrieve a handle for the given path. This will create a handle (and [`AssetInfo`]) if it does not exist
     pub(crate) fn get_or_create_path_handle<'a, A: Asset>(
         &self,
@@ -1112,6 +1148,9 @@ enum MaybeAssetLoader {
         sender: async_broadcast::Sender<Arc<dyn ErasedAssetLoader>>,
         receiver: async_broadcast::Receiver<Arc<dyn ErasedAssetLoader>>,
     },
+    Missing {
+        hint: String,
+    },
 }
 
 /// Internal events for asset load results  
@@ -1219,11 +1258,18 @@ pub enum AssetLoadError {
     },
 }
 
+#[derive(Debug, Clone)]
+struct MissingExtension {
+    extension: String,
+    hint: Option<String>,
+}
+
 /// An error that occurs when an [`AssetLoader`] is not registered for a given extension.
 #[derive(Error, Debug, Clone)]
 #[error("no `AssetLoader` found{}", format_missing_asset_ext(.extensions))]
 pub struct MissingAssetLoaderForExtensionError {
-    extensions: Vec<String>,
+    // Each entry in the vector is the extension and an optional hint to enable it.
+    extensions: Vec<MissingExtension>,
 }
 
 /// An error that occurs when an [`AssetLoader`] is not registered for a given [`std::any::type_name`].
@@ -1233,13 +1279,29 @@ pub struct MissingAssetLoaderForTypeNameError {
     type_name: String,
 }
 
-fn format_missing_asset_ext(exts: &[String]) -> String {
+fn format_missing_asset_ext(exts: &[MissingExtension]) -> String {
     if !exts.is_empty() {
-        format!(
-            " for the following extension{}: {}",
+        let mut msg = format!(
+            " for the following extension{}: ",
             if exts.len() > 1 { "s" } else { "" },
-            exts.join(", ")
-        )
+        );
+        for (
+            i,
+            MissingExtension {
+                ref extension,
+                ref hint,
+            },
+        ) in exts.iter().enumerate()
+        {
+            msg += &extension;
+            if let Some(ref hint) = hint {
+                let _ = write!(msg, " (try {})", hint);
+            }
+            if i < exts.len() - 1 {
+                msg += ",";
+            }
+        }
+        msg
     } else {
         " for file with no extension".to_string()
     }

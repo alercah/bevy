@@ -1,4 +1,4 @@
-use bevy_asset::{io::Reader, AssetLoader, AsyncReadExt, LoadContext};
+use bevy_asset::{io::Reader, AssetLoader, AssetServer, AsyncReadExt, LoadContext};
 use bevy_ecs::prelude::{FromWorld, World};
 use thiserror::Error;
 
@@ -44,6 +44,37 @@ pub(crate) const IMG_FILE_EXTENSIONS: &[&str] = &[
     "pgm",
     #[cfg(feature = "pnm")]
     "ppm",
+];
+
+pub(crate) struct DisabledExtension {
+    extension: &'static str,
+    feature: &'static str,
+}
+
+macro_rules! disabled_ext (
+    ($feature:literal, $ext:literal) => (
+        #[cfg(not(feature = $feature))]
+        DisabledExtension{
+            extension: $ext,
+            feature: $feature,
+        }
+    );
+);
+
+pub(crate) const DISABLED_IMG_FILE_EXTENSIONS: &[DisabledExtension] = &[
+    disabled_ext!("basis-universal", "basis"),
+    disabled_ext!("bmp", "bmp"),
+    disabled_ext!("png", "png"),
+    disabled_ext!("dds", "dds"),
+    disabled_ext!("tga", "tga"),
+    disabled_ext!("jpeg", "jpg"),
+    disabled_ext!("jpeg", "jpeg"),
+    disabled_ext!("ktx2", "ktx2"),
+    disabled_ext!("webp", "webp"),
+    disabled_ext!("pnm", "pam"),
+    disabled_ext!("pnm", "pbm"),
+    disabled_ext!("pnm", "pgm"),
+    disabled_ext!("pnm", "ppm"),
 ];
 
 #[derive(Serialize, Deserialize, Default, Debug)]
@@ -128,6 +159,16 @@ impl FromWorld for ImageLoader {
 
             None => CompressedImageFormats::NONE,
         };
+
+        if let Some(asset_server) = world.get_resource::<AssetServer>() {
+            for DisabledExtension { extension, feature } in DISABLED_IMG_FILE_EXTENSIONS {
+                asset_server.register_extension_hint(
+                    extension,
+                    format!("enabling bevy feature '{}'", feature),
+                )
+            }
+        }
+
         Self {
             supported_compressed_formats,
         }
